@@ -1,0 +1,521 @@
+---
+title: "Project"
+author: "Loc Dam"
+date: "2022-11-22"
+output:
+  pdf_document: default
+  html_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+options(tinytex.verbose = TRUE)
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+```{r}
+
+
+library(tidyverse) 
+library(ggplot2)
+library(plyr)
+library(doParallel)
+library(dplyr)
+library(grid)
+
+library(maps)
+library(sf) 
+library(spData) 
+library(gridExtra) 
+library(maps) 
+library(corrplot)
+library(viridis) 
+library(tm) 
+library(Metrics) 
+library(randomForest) 
+library(neuralnet) 
+library(wordcloud) 
+library(rpart.plot) 
+list.files(path = "../input")
+
+
+```
+
+**Load the data**
+
+```{r}
+states <- map_data("state")
+```
+
+```{r}
+df <- read.csv("airbnb-listings.csv", sep = ";", header = T)
+```
+```{r}
+glimpse(df)
+```
+
+
+```{r}
+df <- df|>
+  filter(Country == "United States")
+  #mutate(price_per_night = round(Price/Minimum.Nights))|>
+  #head(df,10)
+#tail(df, 10)
+tail(df, 10)
+```
+
+
+
+
+**Zero price listing**
+
+One further observation from examining the tail of the data (when sorted by price_percentile) is that there are a number of Airbnbs with a listed price of zero. As nice as this would be, it's likely some manner of interal issue with the listing (perhaps an incomplete listing, or some other issue). Before we take our 95% of data, we should also get rid of the low end anomalies. In fact, let's get rid of everything with a price of $10 or less, just to be on the safe side
+
+```{r}
+# remove values with price of $10 or lower
+df <- df |>
+  
+  filter(Price > 10)|>
+  mutate(price_per_night = round(Price/Minimum.Nights))|>
+  filter(price_per_night > 10)
+```
+
+
+**Investigate the missing data**
+
+Since this is a huge dataset, it is unadvoidably will have NA values. Let's look at the last review, review_per_month and its NA values:
+
+```{r}
+df|>
+  select(Last.Review, Reviews.per.Month) |>
+    filter((is.na(Last.Review) & !is.na(Reviews.per.Month)) | (!is.na(Last.Review) & is.na(Reviews.per.Month))) |>
+    dim()
+```
+We see that there is no noticeable observation.
+
+**NA value in neighbourhood_group**
+
+We notice there is a significantly large number in neighbourhood_group. count = 115845. We will group them and observe the abnormality.
+```{r}
+df |>
+  group_by(Neighbourhood.Group.Cleansed) |>
+  count()|>
+  tail()
+
+
+```
+Now, let's plot these neighbourhood_group on the map and observe its NA values.
+```{r}
+
+df |>
+    filter(Longitude > -140 & Latitude > 25) |>
+    ggplot() + 
+    geom_polygon(data=states, fill = "white", aes(long, lat, group=group), colour = "black") +
+    geom_point(aes(x=Longitude, y=Latitude, color=Neighbourhood.Group.Cleansed, size=2, alpha=0.4)) +     
+    coord_map()
+```
+As we can see, the NA (gray) scatter through out the country. Hence, it is ok to change these NA values to "other cities", which make further analyze clearer.
+
+
+```{r}
+df = df |>
+  mutate(neighbourhood_group = ifelse(Neighbourhood.Group.Cleansed == "Other Cities", "Other LA Cities", Neighbourhood.Group.Cleansed),
+               neighbourhood_group = ifelse(Neighbourhood.Group.Cleansed == "Other neighborhoods", "Other Seattle neighbourhoods", Neighbourhood.Group.Cleansed),
+               neighbourhood_group = ifelse(is.na(Neighbourhood.Group.Cleansed), "Other Cities", Neighbourhood.Group.Cleansed))
+```
+
+
+```{r}
+glimpse(df)
+```
+ 
+Take a glimpse at the data, we notice that there is no column of state, which is also a good factor needed to be analyze. Hence, let's create a function that convert longtitude and latitude of each location into its state.
+
+```{r}
+lonlat_to_state <- function(pointsDF,
+                            states = spData::us_states,
+                            name_col = "NAME") {
+    ## Convert points data.frame to an sf POINTS object
+    pts <- st_as_sf(pointsDF, coords = 1:2, crs = 4326)
+
+    ## Transform spatial data to some planar coordinate system
+    ## (e.g. Web Mercator) as required for geometric operations
+    states <- st_transform(states, crs = 3857)
+    pts <- st_transform(pts, crs = 3857)
+
+    ## Find names of state (if any) intersected by each point
+    state_names <- states[[name_col]]
+    ii <- as.integer(st_intersects(pts, states))
+    state_names[ii]
+}
+
+lonlat_points <- data.frame(x =df$Longitude, y = df$Latitude)
+df$state = lonlat_to_state(lonlat_points)
+
+
+```
+
+
+
+
+**Number listing per state**
+
+Now, let's have a look at number listing per state. I predict that the highly populated states like California and Newyork should be at the top of then list. 
+
+```{r}
+number_of_listings_by_state <- aggregate(cbind(df$ID), by = list(state = df$state), FUN = length)
+order_df<- number_of_listings_by_state[order(number_of_listings_by_state$V1, decreasing = TRUE),]
+colnames(order_df)[2] = "Number of Listing by state"
+head(order_df)
+```
+```{r}
+removeRowsWithNA <- function(df, desiredCols) {
+  completeVec <- complete.cases(df[, desiredCols])
+  return(df[completeVec, ])
+}
+```
+
+Indeed, our prediction is correct. Now, let's visualize it
+
+```{r}
+p<- ggplot(number_of_listings_by_state, aes(x =state, y= V1, fill = state))+
+  geom_bar(stat="identity")+
+  theme_minimal()+
+  xlab("State")+ ylab("Number of listing") + labs(title = "Number of listing per state")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+p
+```
+
+```{r}
+# Get the room types and their percentages
+room_types_counts <- table(df$Room.Type)
+room_types <- names(room_types_counts)
+counts <- as.vector(room_types_counts)
+percentages <- scales::percent(round(counts/sum(counts), 2))
+room_types_percentages <- sprintf("%s (%s)", room_types, percentages)
+room_types_counts_df <- data.frame(group = room_types, value = counts)
+
+# Plot
+pie <- ggplot(room_types_counts_df, aes(x = "", y = value, fill = room_types_percentages))+
+  geom_bar(width = 1, stat = "identity")+
+  coord_polar("y", start = 0)+
+  scale_fill_brewer("Room Types", palette = "Dark2")+
+  ggtitle("Type of listings")+
+  ylab("")+
+  xlab("")+
+  labs(fill="")+
+  theme(axis.ticks = element_blank(), panel.grid = element_blank(), axis.text = element_blank())+
+  geom_text(aes(label = percentages), size = 5, position = position_stack(vjust = 0.5))
+pie
+```
+Most of listing is entire home or apartments. Private room also takes a significant portion. Meanwhile, the shared room plays a really small role in this. 
+
+One thing we can take away from this is that traveler prefer privacy at a high degree. That is why the investors focus on operating in entire home, apartment and private room. This is also a strong point of Airbnb versus the traditional hotel format where the staying locations are much more confined and exposed to public.
+
+**Pricing**
+
+Let's analyze the most concerned factor of any business, Pricing. First, let start with the average pring per state. Since California and Newyork have the most listing, we believe that they should have the most affordable pricing since the high competition in such crowded states.
+```{r}
+# Calculate the average price per state
+average_prices_per_state <- aggregate(cbind(df$price_per_night),
+                  by = list(state = df$state),
+                  FUN = function(x) mean(x))
+
+# Plot
+ggplot(data = average_prices_per_state, aes(x = average_prices_per_state$state, y = average_prices_per_state$V1))+
+    geom_bar(stat = "identity", fill = "steelblue", width = 0.7)+
+    geom_text(aes(label = round(average_prices_per_state$V1, 2)), size=4)+
+    coord_flip()+
+    xlab("State")+
+    ylab("Average Price Per Night")+ 
+  labs(title = "Average Price per State") +
+    theme_minimal()
+```
+
+Indeed, most of the states has the average pricing per night fluctuate around \$50 to \$125.
+
+```{r}
+highest_price_per_night <- df |>
+  group_by(state)|>
+  select(state, price_per_night,Price,  Minimum.Nights)|>
+  filter(Price == max(Price), state != "NA")
+  #mutate(price_per_night = price/minimum_nights)
+ 
+highest_price_per_night<-distinct(highest_price_per_night)
+highest_price_per_night
+
+ggplot(data = highest_price_per_night, aes(x = highest_price_per_night$state, y = highest_price_per_night$price_per_night))+
+    geom_bar(stat = "identity", fill = "steelblue", width = 0.7)+
+    #geom_text(aes(label = round(highest_price_per_night$price_per_night, 2)), size=4)+
+    coord_flip()+
+    xlab("State")+
+    ylab("Highest Price")+  
+    labs(title = "Highest price per state")+
+    theme_minimal()
+
+```
+
+
+```{r}
+ggplot(data = df, aes(x = state, y = price_per_night, color = state)) +
+  geom_boxplot(outlier.shape = NA) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  coord_cartesian(ylim = c(0, 750))
+```
+
+
+
+Let's investigate the relation between number of reviews and its pricing.
+```{r}
+df|>
+  select(Name, Number.of.Reviews, price_per_night)|>
+  arrange(desc(Number.of.Reviews))
+
+  
+```
+```{r}
+p1<-ggplot(df, aes(x = price_per_night, y = Number.of.Reviews )) +
+  geom_point( size = 2)+
+  geom_smooth(method = lm, se = FALSE)+
+  labs(title = "Relation between pricing and number of reviews")+
+  ylab("Number of reviews")+
+  xlab("Price per Night")
+p1
+```
+As we notice, on the lower range of price, which means they are more affordable. This leads to these listing have more reviews.
+
+```{r}
+
+
+ggplot(data = df, aes(x = Room.Type, y = price_per_night,fill=Room.Type)) +
+  geom_boxplot(outlier.shape = NA) +theme(axis.text.x = element_text(angle = 90, hjust = 1)) +coord_cartesian(ylim = c(0, 500))+
+  xlab("Room type")+ ylab("Price per Night")+ labs(title = "Relation between room type and price")
+```
+This also consistent with our observation so far where the Entire home should takes the most percentage as well as the highest average value.
+
+```{r}
+ggplot(data = df, aes(x = Host.Total.Listings.Count , y = price_per_night, color=Host.Total.Listings.Count )) +geom_point(size=0.1) +
+  labs(title = "Total host listing counts vs Price")
+
+```
+
+This is also makes sense with the market. The lower the price, the more bookings.
+
+Let's look at the distribution of property type.
+
+```{r}
+df_no_NA <-subset(df,Property.Type != "N/A" & Property.Type != "")
+
+ggplot(data = df_no_NA, aes(x = Property.Type, y = price_per_night,color=Property.Type)) +geom_boxplot(outlier.shape = NA) +theme(axis.text.x = element_text(angle = 90, hjust = 1)) +coord_cartesian(ylim = c(0, 1700))+
+  labs(title = "Property Types Distribution")
+```
+
+It seems like townhouse play the major role in this market. However, it is interesting to see such a wide range of different property types, such as castle, train, tent,...
+
+```{r}
+city_to_state <- df |>
+  group_by(City, state) |>
+    count() |> 
+    filter(!is.na(state)) |> 
+    arrange(City) |> 
+    ungroup() |> 
+    distinct(City, .keep_all=TRUE) |>
+    select(City, state) 
+    
+```
+
+
+```{r}
+df_city <- df |> left_join(city_to_state, by="City", suffix=c("_sf", "_imputed"))
+
+# creating a unified state field based on the simple features value if present and the imputed value otherwise
+df_city <- df_city |> 
+  mutate(state = ifelse(is.na(state_sf), state_imputed, state_sf)) |>
+  select(-state_sf, -state_imputed)
+df_city
+```
+
+
+
+
+```{r}
+
+df_city |>
+    ggplot(aes(x=price_per_night)) + 
+    geom_histogram(bins=40, fill="#69b3a2", color="#e9ecef", alpha=0.9) + 
+    xlim(0, 3000) + xlab("price per night")
+    ggtitle("Distribution of AirBnb Prices in US Dataset")
+```
+```{r}
+ggplot(data = df, aes(x = Cancellation.Policy, y = price_per_night,color=Cancellation.Policy)) +
+  geom_boxplot(outlier.shape = NA) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  coord_cartesian(ylim = c(0, 3000))
+```
+We can see that the prices are slightly more expensive for the listings that have a strict cancellation policy
+
+```{r}
+# create copy of dataset
+data_clean <- df 
+
+# remove values with price of $10 or lower
+data_clean <- data_clean %>% filter(price_per_night > 10)
+
+# get rid of the top 5% percentile of prices in each city
+data_clean = data_clean %>% 
+    group_by(City) %>% 
+    mutate(price_percentile = rank(price_per_night, ties.method="first") / length(price_per_night)) %>% 
+    filter(price_percentile < 0.9) %>% 
+    ungroup()
+```
+
+
+```{r}
+top_states <- number_of_listings_by_state|>
+  arrange(desc(V1))|>
+  head(7)
+top_states
+```
+
+
+
+
+
+```{r}
+
+df_city %>% filter(state %in% top_states$state) %>% 
+    ggplot(aes(x=state, y=price_per_night, fill=state)) + 
+    geom_boxplot(alpha=0.9) + 
+    ylim(0, 1000) +
+    ggtitle("Price distribution by rich States")  + 
+    theme(axis.text.x=element_text(angle=45, hjust=1)) + 
+    scale_fill_viridis_d()
+```
+
+This is also suspicious - why are New York Airbnbs cheaper than other states? Potentially, this could be down to the types of rooms on offer.
+
+
+```{r}
+data_clean %>% filter(state %in% top_states$state) %>%
+
+    mutate(state = ifelse(state == "New York", "New York", "Other Top States"))  %>%
+    ggplot(aes(x=state, y=price_per_night, fill=Room.Type, order = (Room.Type) )) + 
+    geom_bar(position = position_fill(reverse = TRUE), stat = "identity") + 
+    ggtitle("Breakdown by type of room")  + 
+    theme(axis.text.x=element_text(angle=45, hjust=1)) + 
+    scale_fill_viridis_d()
+    
+```
+Looking at the breakdown, we see that NewYork offers more private room than Entire home/apt, and the price of private room abviously cheaper than the entire home, which in average will bring New York relatively cheaper than other top states.
+
+**Review analysis**
+
+```{r}
+glimpse(df)
+```
+
+
+```{r}
+scores <- c("Review.Scores.Rating","Review.Scores.Accuracy","Review.Scores.Cleanliness","Review.Scores.Checkin","Review.Scores.Communication","Review.Scores.Location","Review.Scores.Value")
+scores_data <- df[scores]
+scores_data <- removeRowsWithNA(scores_data, scores)
+
+```
+
+```{r}
+library(cowplot)
+library(gridExtra)
+```
+
+
+```{r}
+a <-ggplot(data = scores_data, aes(x = Review.Scores.Accuracy, y = Review.Scores.Rating )) +
+  geom_jitter(size = 0.1) + xlab("accuracy") +ylab("Rating")
+
+b <- ggplot(data = scores_data, aes(x = Review.Scores.Cleanliness, y = Review.Scores.Rating )) + 
+  geom_jitter(size = 0.1)   + xlab("cleanliness") +ylab("Rating")
+c <- ggplot(data = scores_data, aes(x = Review.Scores.Checkin, y = Review.Scores.Rating )) +
+  geom_jitter(size = 0.1)+ xlab("checkin") +ylab("Rating")
+
+d <-  ggplot(data = scores_data, aes(x = Review.Scores.Communication, y = Review.Scores.Rating )) +
+  geom_jitter(size = 0.1)+ xlab("Communication") +ylab("Rating")
+
+e <- ggplot(data = scores_data, aes(x = Review.Scores.Location, y = Review.Scores.Rating )) +
+  geom_jitter(size = 0.1)+ xlab("Location") +ylab("Rating")
+
+f <-  ggplot(data = scores_data, aes(x = Review.Scores.Value, y = Review.Scores.Rating )) +
+  geom_jitter(size = 0.1)+ xlab("Value")+ylab("Rating")
+
+grid.arrange(a, b, c, d, e, f , ncol = 2, nrow = 3)
+```
+
+From the plots, we can see that most of the people who give the listings high ratings, give high scores for all the other types of scores (denser in right top corners).
+
+**Host behaviors vs Price**
+
+```{r}
+df_no_NA <-subset(df,Host.Response.Time != "N/A" & Host.Response.Time != "")
+ggplot(data = df_no_NA, aes(x = Host.Response.Time, y = price_per_night,color=Host.Response.Time))+
+  geom_boxplot(outlier.shape = NA) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+coord_cartesian(ylim = c(0, 400))
+
+```
+```{r}
+ggplot(data = df, aes(x = Host.Response.Rate, y = price_per_night, color=Host.Response.Rate)) +
+  geom_point(size=0.5)
+```
+ 
+```{r}
+ggplot(data = df, aes(x = Host.Response.Rate, y = Host.Total.Listings.Count, color=Host.Response.Rate)) +
+  geom_point(size=0.5)
+```
+
+```{r}
+ggplot(data = df, aes(x = Cleaning.Fee, y = Host.Total.Listings.Count, color=Cleaning.Fee)) +
+  geom_point(size=0.5)
+```
+ **Modeling and Prediction**
+ 
+**Relationship between ratings.** 
+
+Let's start with a basic model linear regression between all the rating reviews.
+
+```{r}
+rating_regression <- lm(data=df, Review.Scores.Rating~Review.Scores.Accuracy+Review.Scores.Cleanliness+Review.Scores.Checkin+Review.Scores.Communication+Review.Scores.Location+Review.Scores.Value)
+summary(rating_regression)
+```
+
+The model has good p-value (<2.2e-16). All the factors are significant. Let's plot this and observe its behavior:
+
+```{r}
+ggplot(data = rating_regression, aes(Review.Scores.Rating,Review.Scores.Accuracy+Review.Scores.Cleanliness+Review.Scores.Checkin+Review.Scores.Communication+Review.Scores.Location+Review.Scores.Value)) +
+  geom_point()+
+  geom_smooth(method = 'lm')
+```
+Let's plot more plots to see clearer the relationship.
+
+```{r}
+plot(rating_regression)
+```
+
+The “Normal Q-Q” plot shows if residuals are normally distributed. Our residuals are not well lined on the straight dashed line except in the middle of the plot, which is not quite good.
+
+The “Scale-Location” plot lets us check the assumption of equal variance. Our line is not horizontal with randomly spread points, thus, our residuals are not homoscedastic. This was expected, since from the previous plots of the different types of ratings, we could clearly see that the variance depends on the score.
+
+The “Residuals vs Leverage” plot helps us find influential cases. In fact, even though data has outliers, they might not be influential to determine a regression line. In our plot, we can barely see Cook’s distance lines because all cases are well inside of them. i.e: if we exclude the “52474” case for example, the changes in the slope coefficients won’t be important.
+
+**Relation between Price and its factors**
+
+```{r}
+price_regression <- p_reg1 <- lm(data=df, price_per_night~Host.Response.Rate+Host.Acceptance.Rate+Host.Total.Listings.Count+Property.Type+Room.Type+Accommodates+Bathrooms+Bedrooms+Beds+Bed.Type+Square.Feet+Security.Deposit+Cleaning.Fee+Extra.People+Minimum.Nights+Maximum.Nights+Number.of.Reviews+Cancellation.Policy+State)
+summary(price_regression)
+```
+
+For this model, we have good p-value (<2.2e-16) with good R-squred (0.4537). 
+
+```{r}
+plot(price_regression)
+```
+
+
