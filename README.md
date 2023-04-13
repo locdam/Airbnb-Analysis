@@ -2,6 +2,8 @@
 
 ## About Dataset
 
+For detail analysis, please follow the link: 
+
 This project analyze the U.S. Airbnb Open Data in www.kaggle.com.
 
 Since 2018, Airbnb has emerged as an unique and distinct exploration in the hospitality field. It branched out in a much different way compare to the tradition hospitality industry. Also, as a person who has been working as a host in Airbnb recently, this is a great opportunity to take a deep dive hoping to learn and predict some behavior that can further benefit my business. 
