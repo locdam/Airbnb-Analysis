@@ -2,7 +2,7 @@
 
 ## About Dataset
 
-For detail analysis, please follow the link: 
+For detail analysis, please follow the link: locdam.github.io/Airbnb-Analysis/
 
 This project analyze the U.S. Airbnb Open Data in www.kaggle.com.
 
